@@ -90,6 +90,7 @@ Build a mobile version of the dashboard
 ## Author
 
 Shuban Shinde
+
 B.Tech AI and Data Science
 Thakur College of Engineering and Technology Mumbai
 
