@@ -1,0 +1,174 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <WiFiManager.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ---------------- OLED ----------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ---------------- DHT ----------------
+#define DHTPIN D5
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ---------------- AQ ----------------
+#define AQ_PIN A0
+
+// ---------------- HIVEMQ ----------------
+const char* mqttHost = "2dfc216b33da****ac99b7a1f49****0.s1.eu.hivemq.cloud";//<-----(Replace my api url with yours)
+const int   mqttPort  = 8883;
+const char* mqttUser  = "UserName";
+const char* mqttPass  = "Your Pass";
+const char* mqttTopic = "env/data";
+
+WiFiClientSecure net;
+PubSubClient mqtt(net);
+
+// ---------------- TIMING ----------------
+unsigned long lastSend = 0;
+const unsigned long interval = 2000;
+
+// ---------------- MQTT CONNECT ----------------
+void connectMQTT() {
+  net.setInsecure();
+  mqtt.setServer(mqttHost, mqttPort);
+  Serial.print("Connecting to MQTT...");
+  while (!mqtt.connected()) {
+    if (mqtt.connect("ESP8266Client", mqttUser, mqttPass)) {
+      Serial.println("MQTT Connected!");
+    } else {
+      Serial.print("Failed, state=");
+      Serial.println(mqtt.state());
+      showMessage("MQTT Failed", "Retrying...");
+      delay(3000);
+    }
+  }
+}
+
+// ---------------- SETUP ----------------
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(D2, D1);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED Failed");
+    while (1);
+  }
+
+  display.clearDisplay();
+  display.display();
+  dht.begin();
+
+  showMessage("Booting...", "WiFi Setup");
+
+  WiFiManager wm;
+   //wm.resetSettings(); // uncomment once to clear saved WiFi
+
+  bool res = wm.autoConnect("ESP-EnvMonitor");
+
+  if (!res) {
+    showMessage("WiFi Failed", "Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.println("WiFi Connected!");
+  showMessage("WiFi OK", WiFi.localIP().toString());
+  delay(1500);
+
+  connectMQTT();
+
+  showMessage("MQTT OK", "Sending data...");
+  delay(1500);
+}
+
+// ---------------- LOOP ----------------
+void loop() {
+  if (!mqtt.connected()) connectMQTT();
+  mqtt.loop();
+
+  if (millis() - lastSend >= interval) {
+    lastSend = millis();
+
+    float temp = dht.readTemperature();
+    float hum  = dht.readHumidity();
+    int aqRaw  = analogRead(AQ_PIN);
+
+    if (isnan(temp) || isnan(hum)) {
+      Serial.println("DHT Error");
+      showMessage("DHT Error", "Check sensor");
+      return;
+    }
+
+    String aqLevel = getAQLevel(aqRaw);
+
+    updateOLED(temp, hum, aqLevel, aqRaw);
+
+    String json = "{";
+    json += "\"temp\":"     + String(temp, 1)  + ",";
+    json += "\"hum\":"      + String(hum, 0)   + ",";
+    json += "\"aq_raw\":"   + String(aqRaw)    + ",";
+    json += "\"aq_level\":\"" + aqLevel        + "\"";
+    json += "}";
+
+    bool ok = mqtt.publish(mqttTopic, json.c_str());
+    Serial.println(ok ? "Published: " + json : "Publish failed");
+  }
+}
+
+// ---------------- OLED ----------------
+void showMessage(String line1, String line2) {
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 15);
+  display.println(line1);
+  display.setCursor(0, 30);
+  display.println(line2);
+  display.display();
+}
+
+void updateOLED(float t, float h, String aqLevel, int raw) {
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("Temp:");
+  display.setTextSize(2);
+  display.setCursor(0, 10);
+  display.print(t, 1);
+  display.print("C");
+
+  display.setTextSize(1);
+  display.setCursor(0, 35);
+  display.print("Hum:");
+  display.setTextSize(2);
+  display.setCursor(0, 45);
+  display.print(h, 0);
+  display.print("%");
+
+  display.setTextSize(1);
+  display.setCursor(80, 0);
+  display.print("AQ:");
+  display.setCursor(80, 10);
+  display.print(aqLevel);
+  display.setCursor(80, 20);
+  display.print(raw);
+
+  display.display();
+}
+
+// ---------------- AQI ----------------
+String getAQLevel(int raw) {
+  if (raw < 100) return "Good";
+  if (raw < 220) return "Moderate";
+  if (raw < 400) return "Poor";
+  return "Hazard";
+}
